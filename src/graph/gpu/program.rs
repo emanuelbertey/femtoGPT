@@ -148,12 +148,12 @@ impl Program {
     }
     pub fn create_buffer<T>(&self, length: usize) -> Result<Buffer<T>, ProgramError> {
         assert!(length > 0);
+        let byte_size = length * std::mem::size_of::<T>();
         let buff = ocl::Buffer::<u8>::builder()
             .queue(self.queue.clone())
             .flags(ocl::MemFlags::new().read_write())
-            .len(length * std::mem::size_of::<T>())
+            .len(byte_size)
             .build()?;
-        buff.write(&vec![0u8]).enq()?;
         Ok(Buffer::<T> {
             buffer: buff,
             _phantom: std::marker::PhantomData,
@@ -248,7 +248,12 @@ impl<T> Buffer<T> {
     }
 
     pub fn write_from(&mut self, data: &[T]) -> Result<(), ProgramError> {
-        assert!(data.len() <= self.length());
+        if data.len() > self.length() {
+            panic!(
+                "Buffer overflow: trying to write {} elements into buffer with capacity {}",
+                data.len(), self.length()
+            );
+        }
         self.buffer
             .write(unsafe {
                 std::slice::from_raw_parts(

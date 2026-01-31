@@ -266,7 +266,20 @@ impl Graph for GpuGraph {
     ) -> Result<(), GraphError> {
         self.compile()?;
         let gt = self.tensors.get_mut(tensor_id).unwrap();
-        gt.mirror = GeneralTensor::Usize(tensor.view().into());
+        let new_tensor = GeneralTensor::Usize(tensor.view().into());
+        
+        // Validate that the new tensor size doesn't exceed buffer capacity
+        // (Allow smaller tensors for variable batch sizes)
+        if let Some(ref buffer) = gt.buffer {
+            if new_tensor.size() > buffer.length() {
+                panic!(
+                    "Tensor size mismatch in load_usize: trying to load {} elements into buffer with capacity {} (tensor_id={})",
+                    new_tensor.size(), buffer.length(), tensor_id
+                );
+            }
+        }
+        
+        gt.mirror = new_tensor;
         gt.buffer
             .as_mut()
             .ok_or(GraphError::NotReady)?
@@ -304,7 +317,20 @@ impl Graph for GpuGraph {
     ) -> Result<(), GraphError> {
         self.compile()?;
         let gt = self.tensors.get_mut(tensor_id).unwrap();
-        gt.mirror = GeneralTensor::Float(tensor.view().into());
+        let new_tensor = GeneralTensor::Float(tensor.view().into());
+        
+        // Validate that the new tensor size doesn't exceed buffer capacity
+        // (Allow smaller tensors for variable batch sizes)
+        if let Some(ref buffer) = gt.buffer {
+            if new_tensor.size() > buffer.length() {
+                panic!(
+                    "Tensor size mismatch in load: trying to load {} elements into buffer with capacity {} (tensor_id={})",
+                    new_tensor.size(), buffer.length(), tensor_id
+                );
+            }
+        }
+        
+        gt.mirror = new_tensor;
         gt.buffer
             .as_mut()
             .ok_or(GraphError::NotReady)?
@@ -319,7 +345,20 @@ impl Graph for GpuGraph {
     ) -> Result<(), GraphError> {
         self.compile()?;
         let gt = self.grads.get_mut(tensor_id).unwrap();
-        gt.mirror = GeneralTensor::Float(tensor.view().into());
+        let new_tensor = GeneralTensor::Float(tensor.view().into());
+        
+        // Validate that the new tensor size doesn't exceed buffer capacity
+        // (Allow smaller tensors for variable batch sizes)
+        if let Some(ref buffer) = gt.buffer {
+            if new_tensor.size() > buffer.length() {
+                panic!(
+                    "Tensor size mismatch in load_grad: trying to load {} elements into buffer with capacity {} (tensor_id={})",
+                    new_tensor.size(), buffer.length(), tensor_id
+                );
+            }
+        }
+        
+        gt.mirror = new_tensor;
         gt.buffer
             .as_mut()
             .ok_or(GraphError::NotReady)?

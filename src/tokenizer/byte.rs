@@ -1,5 +1,4 @@
 use super::Tokenizer;
-use std::collections::{HashMap, HashSet};
 
 pub struct ByteTokenizer;
 

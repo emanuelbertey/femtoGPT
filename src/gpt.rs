@@ -18,11 +18,9 @@ pub struct GPT<G: Graph> {
     graph: G,
     num_tokens: usize,
     token_input: TensorId,
-    pos_input: TensorId,
     output: TensorId,
     expected_output: TensorId,
     loss: TensorId,
-    pos_input_fixed: Tensor<f32>,
 }
 
 fn sample_dataset<R: Rng>(
@@ -77,29 +75,6 @@ fn select<R: Rng, T: TensorOps<f32>>(
     panic!();
 }
 
-fn pos_encode_inter(num_tokens: usize, embedding_size: usize) -> Tensor<f32> {
-    let mut raw_new = Vec::new();
-    let cols = embedding_size;
-    let rows = num_tokens;
-    for row in 0..rows {
-        for col in 0..cols {
-            let k = row as f32;
-            let i = (col / 2) as f32;
-            let factor = 10000f32.powf(2f32 * i / embedding_size as f32);
-
-            let pos = if col % 2 == 0 {
-                (k / factor).sin()
-            } else {
-                (k / factor).cos()
-            };
-
-            raw_new.push(pos);
-        }
-    }
-
-    Tensor::raw(&[rows, cols], raw_new).unwrap()
-}
-
 impl<G: Graph> GPT<G> {
     pub fn new<R: Rng>(
         rng: &mut R,
@@ -122,11 +97,6 @@ impl<G: Graph> GPT<G> {
 
         // Token inputs. We will get `num_tokens` tokens as inputs and will have `num_tokens`
         // outputs.
-        // In the case of CPU training, it's much more efficient to parallelize over instances
-        // in a single batch. (I.e. it's not very efficient to parallelize a matrix multiplication
-        // operation on CPUs. Better approach is to process a 32-instanced batch on a 32-core CPU,
-        // where each instance runs on its own core, without parallelizing operations)
-        // That's why we DO NOT specify a `batch_size` when training on a CPU.
         let token_input = g.alloc_usize(
             Tensor::<usize>::zeros(&if let Some(batch_size) = batch_size {
                 vec![batch_size, num_tokens]
@@ -149,18 +119,9 @@ impl<G: Graph> GPT<G> {
         // lookup table.
         let embedded_token_input = g.call(Embedding::new(), &[token_input, token_embedding])?;
 
-        // Map token positions into `embedding_degree` dimension vectors.
-        let pos_input = g.alloc(
-            Tensor::<f32>::rand(rng, &[num_tokens, embedding_degree]),
-            false,
-            "pos_input".into(),
-        )?;
+        // In RoPE, we don't add absolute positional embeddings at the beginning.
+        let mut curr_inp = embedded_token_input;
 
-        // Positional+Token information will both reside in a single `embedding_degree` dimension
-        // vector.
-        let inp = g.call(Add::new(), &[embedded_token_input, pos_input])?;
-
-        let mut curr_inp = inp;
         for l in 0..num_layers {
             // Normalize input before applying multi-head attention
             let norm_coeff = g.alloc(
@@ -185,7 +146,8 @@ impl<G: Graph> GPT<G> {
                     true,
                     format!("head_{}_{}_k", l, h),
                 )?;
-                let k = g.call(MatMul::new(), &[norm_inp, k_params])?;
+                let k_proj = g.call(MatMul::new(), &[norm_inp, k_params])?;
+                let k = g.call(RoPE::new(), &[k_proj])?;
 
                 // Query
                 let q_params = g.alloc(
@@ -193,7 +155,8 @@ impl<G: Graph> GPT<G> {
                     true,
                     format!("head_{}_{}_q", l, h),
                 )?;
-                let q = g.call(MatMul::new(), &[norm_inp, q_params])?;
+                let q_proj = g.call(MatMul::new(), &[norm_inp, q_params])?;
+                let q = g.call(RoPE::new(), &[q_proj])?;
 
                 // Value
                 let v_params = g.alloc(
@@ -232,8 +195,8 @@ impl<G: Graph> GPT<G> {
             let proj_cat_bias = g.call(Add::new(), &[proj_cat, proj_bias_params])?;
             let dropped_proj_cat_bias = g.call(Dropout::new(dropout), &[proj_cat_bias])?;
 
-            // Add attention results to input and then normalize
-            let add_atten = g.call(Add::new(), &[norm_inp, dropped_proj_cat_bias])?;
+            // Add attention results to input
+            let add_atten = g.call(Add::new(), &[curr_inp, dropped_proj_cat_bias])?;
             let add_atten_norm_coeff = g.alloc(
                 Tensor::<f32>::rand(rng, &[embedding_degree]),
                 true,
@@ -249,10 +212,7 @@ impl<G: Graph> GPT<G> {
                 &[add_atten, add_atten_norm_coeff, add_atten_norm_bias],
             )?;
 
-            // A feed-forward layer:
-            // Linear embedding_degree -> 4*embedding_degree
-            // Relu
-            // Linear 4*embedding_degree -> embedding_degree
+            // A feed-forward layer
             let lin1_params = g.alloc(
                 Tensor::<f32>::rand(rng, &[embedding_degree, 4 * embedding_degree]),
                 true,
@@ -279,7 +239,7 @@ impl<G: Graph> GPT<G> {
             let lin2_result = g.call(MatMul::new(), &[lin1_act, lin2_params])?;
             let lin2_bias_result = g.call(Add::new(), &[lin2_result, bias2_params])?;
 
-            curr_inp = g.call(Add::new(), &[add_atten_norm, lin2_bias_result])?;
+            curr_inp = g.call(Add::new(), &[add_atten, lin2_bias_result])?;
         }
 
         // Normalize the output after the last layer
@@ -315,11 +275,9 @@ impl<G: Graph> GPT<G> {
             graph: g,
             num_tokens,
             token_input,
-            pos_input,
             output,
             expected_output,
             loss,
-            pos_input_fixed: pos_encode_inter(num_tokens, embedding_degree),
         })
     }
 
@@ -389,8 +347,6 @@ impl<G: Graph> GPT<G> {
     where
         G: Clone + Send + Sync,
     {
-        self.graph.load(self.pos_input, &self.pos_input_fixed)?;
-
         for i in 0..num_batches {
             let timer = Instant::now();
             let (graphs, errs): (Vec<G>, Vec<f32>) = (0..batch_size)
@@ -454,8 +410,6 @@ impl<G: Graph> GPT<G> {
         learning_rate: F,
         callback: C,
     ) -> Result<(), GraphError> {
-        self.graph.load(self.pos_input, &self.pos_input_fixed)?;
-
         for i in 0..num_batches {
             let timer = Instant::now();
             let mut rng = rand::thread_rng();
@@ -493,8 +447,6 @@ impl<G: Graph> GPT<G> {
         let mut cnt = prompt.len();
         let mut context = vec![0; self.num_tokens];
         context[..prompt.len()].copy_from_slice(prompt);
-
-        self.graph.load(self.pos_input, &self.pos_input_fixed)?;
 
         for ch in prompt {
             callback(*ch);

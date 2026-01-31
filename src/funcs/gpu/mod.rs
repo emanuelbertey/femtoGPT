@@ -8,6 +8,7 @@ pub mod gelu;
 pub mod layer_norm;
 pub mod matmul;
 pub mod relu;
+pub mod rope;
 pub mod softmax;
 pub mod transpose;
 pub mod trilmask;
